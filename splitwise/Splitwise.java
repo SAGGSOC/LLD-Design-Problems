@@ -433,23 +433,50 @@ class UserController {
 
 class BalanceSheetController {
 
+    /**
+     * Updates balance sheets of BOTH the payer and each debtor when an expense is created.
+     * Double-entry bookkeeping: every debt appears in both users' books from opposite perspectives.
+     *
+     * Example: Alice pays $900, split equally among Alice($300), Bob($300), Charlie($300)
+     *
+     * For each split:
+     *   Case A (split.user == payer): Just track payer's own consumption. No debt.
+     *   Case B (split.user != payer): Create debt on both sides:
+     *     - PAYER side:  "X owes me $amount"   → totalYouGetBack += amount, userVsBalance[X].getBack += amount
+     *     - DEBTOR side: "I owe payer $amount"  → totalYouOwe += amount, userVsBalance[payer].owe += amount
+     *
+     * After processing:
+     *   Alice: totalPayment=900, totalYourExpense=300, totalGetBack=600, totalOwe=0
+     *   Bob:   totalPayment=0,   totalYourExpense=300, totalGetBack=0,   totalOwe=300
+     *
+     * Invariant: sum of all users' (totalGetBack - totalOwe) == 0 (books always balance)
+     */
     public void updateUserExpenseBalanceSheet(User expensePaidBy, List<Split> splits, double totalExpenseAmount) {
 
+        // Get payer's balance sheet
         UserExpenseBalanceSheet paidByUserExpenseSheet = expensePaidBy.getUserExpenseBalanceSheet();
+
+        // Track total money that left payer's wallet
         paidByUserExpenseSheet.setTotalPayment(paidByUserExpenseSheet.getTotalPayment() + totalExpenseAmount);
 
+        // Process each person's share
         for (Split split : splits) {
 
-            User userOwe = split.getUser();
+            User userOwe = split.getUser();           // Who is this split for?
             UserExpenseBalanceSheet oweUserExpenseSheet = userOwe.getUserExpenseBalanceSheet();
-            double oweAmount = split.getAmountOwe();
+            double oweAmount = split.getAmountOwe();  // Their share amount
 
             if (expensePaidBy.getUserId().equals(userOwe.getUserId())) {
+                // ──── CASE A: Payer's own share ────
+                // Just record what payer consumed. No debt to self.
                 paidByUserExpenseSheet.setTotalYourExpense(paidByUserExpenseSheet.getTotalYourExpense() + oweAmount);
             } else {
+                // ──── CASE B: Someone else owes the payer ────
 
+                // ── PAYER SIDE: "I am owed $oweAmount more" ──
                 paidByUserExpenseSheet.setTotalYouGetBack(paidByUserExpenseSheet.getTotalYouGetBack() + oweAmount);
 
+                // Get or create pairwise balance: payer → debtor
                 Balance userOweBalance;
                 if (paidByUserExpenseSheet.getUserVsBalance().containsKey(userOwe.getUserId())) {
                     userOweBalance = paidByUserExpenseSheet.getUserVsBalance().get(userOwe.getUserId());
@@ -457,11 +484,15 @@ class BalanceSheetController {
                     userOweBalance = new Balance();
                     paidByUserExpenseSheet.getUserVsBalance().put(userOwe.getUserId(), userOweBalance);
                 }
+                // In payer's books: "debtor owes me $oweAmount"
                 userOweBalance.setAmountGetBack(userOweBalance.getAmountGetBack() + oweAmount);
 
+                // ── DEBTOR SIDE: "I owe payer $oweAmount more" ──
                 oweUserExpenseSheet.setTotalYouOwe(oweUserExpenseSheet.getTotalYouOwe() + oweAmount);
+                // Debtor consumed $oweAmount worth (even though they didn't pay)
                 oweUserExpenseSheet.setTotalYourExpense(oweUserExpenseSheet.getTotalYourExpense() + oweAmount);
 
+                // Get or create pairwise balance: debtor → payer
                 Balance userPaidBalance;
                 if (oweUserExpenseSheet.getUserVsBalance().containsKey(expensePaidBy.getUserId())) {
                     userPaidBalance = oweUserExpenseSheet.getUserVsBalance().get(expensePaidBy.getUserId());
@@ -469,6 +500,7 @@ class BalanceSheetController {
                     userPaidBalance = new Balance();
                     oweUserExpenseSheet.getUserVsBalance().put(expensePaidBy.getUserId(), userPaidBalance);
                 }
+                // In debtor's books: "I owe payer $oweAmount"
                 userPaidBalance.setAmountOwe(userPaidBalance.getAmountOwe() + oweAmount);
             }
         }
