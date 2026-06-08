@@ -2,6 +2,7 @@ package parkinglot;
 
 import java.time.LocalDateTime;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
@@ -36,7 +37,7 @@ public class ParkingLotv2 {
     static class ParkingSpot {
         private final String id;
         private final SpotType spotType;
-        private boolean free = true;
+        private volatile boolean free = true;  // volatile: visible across threads immediately
 
         public ParkingSpot(String id, SpotType spotType) {
             this.id = id;
@@ -304,15 +305,15 @@ public class ParkingLotv2 {
 
     static class ParkingLot {
         private final List<ParkingLevel> levels;
-        private final Map<String, Ticket> activeTickets;
-        private final Map<String, ParkingSpot> ticketToSpot; // for releasing on exit
+        private final Map<String, Ticket> activeTickets;      // ConcurrentHashMap: safe for concurrent enter/exit
+        private final Map<String, ParkingSpot> ticketToSpot;  // ConcurrentHashMap: same
         private final PricingStrategy pricingStrategy;
         private final List<CapacityListener> listeners;
 
         public ParkingLot(List<ParkingLevel> levels, PricingStrategy pricingStrategy) {
             this.levels = levels;
-            this.activeTickets = new HashMap<>();
-            this.ticketToSpot = new HashMap<>();
+            this.activeTickets = new ConcurrentHashMap<>();
+            this.ticketToSpot = new ConcurrentHashMap<>();
             this.pricingStrategy = pricingStrategy;
             this.listeners = new ArrayList<>();
         }
