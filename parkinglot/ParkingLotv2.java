@@ -366,10 +366,10 @@ public class ParkingLotv2 {
             ParkingSpot spot = ticketToSpot.get(ticketId);
             SpotType type = mapVehicleToSpot(ticket.getVehicleType());
             ParkingLevel level = levels.get(findLevelIndex(ticket.getLevel()));
-            level.unPark(type, spot);
+                level.unPark(type, spot);
 
-            activeTickets.remove(ticketId);
-            ticketToSpot.remove(ticketId);
+                activeTickets.remove(ticketId);
+                ticketToSpot.remove(ticketId);
 
             System.out.println("  Exit: Spot " + spot.getId() + " freed");
             notifyListeners(type, level);
