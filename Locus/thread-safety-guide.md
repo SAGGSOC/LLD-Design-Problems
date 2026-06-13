@@ -140,3 +140,103 @@ Can you make it immutable?
 3. **Synchronizing on the wrong monitor** — `synchronized(localVariable)` is useless if each thread gets a different instance.
 4. **Publishing partially-constructed objects** — Don't let `this` escape the constructor (e.g., passing `this` to another thread or registering a listener).
 5. **Iterating over a collection while another thread modifies it** — Use a snapshot copy or a concurrent collection that supports safe iteration.
+
+
+---
+
+## 8. synchronized vs ReentrantLock — When to Use Which
+
+### Use `synchronized` when:
+
+| Scenario | Why |
+|----------|-----|
+| Short critical sections (few lines) | Simple, no boilerplate |
+| No need for tryLock or timeout | `synchronized` blocks until acquired |
+| Single condition (one wait/notify set) | Good enough |
+| Interview default | Less code, fewer mistakes |
+| Lock is always released (no complex control flow) | JVM guarantees unlock even on exception |
+
+```java
+// Simple, clean, auto-releasing
+synchronized (bucket) {
+    bucket.tokens -= 1;
+    remaining = (int) bucket.tokens;
+}
+```
+
+### Use `ReentrantLock` when:
+
+| Scenario | Why |
+|----------|-----|
+| Need `tryLock()` (non-blocking attempt) | "If I can't get the lock in 5ms, fail-open" |
+| Need `tryLock(timeout)` | Avoid indefinite blocking |
+| Need fairness (FIFO ordering) | `new ReentrantLock(true)` |
+| Need `lockInterruptibly()` | Thread can be interrupted while waiting |
+| Need multiple conditions | `lock.newCondition()` (e.g., "notFull" + "notEmpty") |
+| Lock spans complex control flow | Try-finally gives explicit control |
+| Need to check `isLocked()` or `getQueueLength()` | Introspection for monitoring |
+
+```java
+ReentrantLock lock = new ReentrantLock();
+lock.lock();
+try {
+    // complex multi-step operation
+} finally {
+    lock.unlock();
+}
+```
+
+### Decision Flowchart
+
+```
+Do you need tryLock, timeout, or fairness?
+  └─ Yes → ReentrantLock
+  └─ No → Do you need multiple Conditions (separate wait sets)?
+              └─ Yes → ReentrantLock
+              └─ No → Do you need lock introspection (monitoring)?
+                          └─ Yes → ReentrantLock
+                          └─ No → Use synchronized (simpler, less error-prone)
+```
+
+### Use ReadWriteLock when:
+
+| Scenario | Why |
+|----------|-----|
+| Many concurrent reads, rare writes | Reads don't block each other |
+| Read operations are expensive/slow | Maximize read parallelism |
+| Stale reads are not acceptable | Unlike ConcurrentHashMap which allows weak consistency |
+
+```java
+ReadWriteLock rwLock = new ReentrantReadWriteLock();
+
+// Multiple readers concurrently:
+rwLock.readLock().lock();
+try { return findAvailableSpot(); }
+finally { rwLock.readLock().unlock(); }
+
+// Exclusive writer:
+rwLock.writeLock().lock();
+try { spot.occupy(); }
+finally { rwLock.writeLock().unlock(); }
+```
+
+### Summary Table — All Lock Types
+
+| Lock Type | Mutual Exclusion | Read Parallelism | tryLock | Fairness | Use Case |
+|-----------|-----------------|-----------------|---------|----------|----------|
+| `synchronized` | ✅ | ❌ | ❌ | ❌ | Simple mutual exclusion |
+| `ReentrantLock` | ✅ | ❌ | ✅ | ✅ (optional) | Complex locking needs |
+| `ReadWriteLock` | ✅ (write) | ✅ (read) | ✅ | ✅ (optional) | Read-heavy workloads |
+| `StampedLock` | ✅ | ✅ + optimistic | ✅ | ❌ | Ultra-high-perf reads |
+
+### Examples from This Repo
+
+| Problem | Lock Choice | Reason |
+|---------|-------------|--------|
+| Rate Limiter (TokenBucket) | `synchronized(bucket)` | Tiny critical section, no need for tryLock |
+| Parking Lot (SpotManager) | `ReadWriteLock` | Many threads checking availability (reads), few parking (writes) |
+| Inventory (Warehouse transfer) | `synchronized` + lock ordering | Need two locks in consistent order for deadlock prevention |
+| GetInShape (WorkoutSlot) | `ReentrantLock` | Could use tryLock in future for timeout-based booking |
+| FoodCart (Restaurant) | `ReentrantLock` | Optimistic read → lock → re-verify pattern |
+| BookMyShow (Seats) | `ReentrantLock` per seat + lock ordering | Multiple seats locked in sorted order |
+| Elevator (SpotManager) | `ReadWriteLock` | Read: find elevator, Write: add/remove elevator |

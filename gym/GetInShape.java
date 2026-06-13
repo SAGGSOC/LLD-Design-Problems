@@ -1,4 +1,6 @@
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Collectors;
 
 /**
@@ -10,6 +12,11 @@ import java.util.stream.Collectors;
  *   3. View availability (sorted by start time or seats available)
  *   4. Book / Cancel sessions
  *   5. Notify-me interest list (Observer pattern)
+ *
+ * Concurrency:
+ *   - ConcurrentHashMap for centers and slot index (safe concurrent reads/writes)
+ *   - ReentrantLock per WorkoutSlot (book/cancel/interest are short critical sections)
+ *   - Per-slot locking: booking yoga at center A doesn't block booking weights at center B
  */
 public class GetInShape {
 
@@ -44,6 +51,7 @@ public class GetInShape {
         int seatsAvailable;
         final Set<String> bookedUsers;         // userId set
         final List<String> interestList;       // ordered list of interested userIds
+        final ReentrantLock lock;              // per-slot lock for book/cancel/interest
 
         WorkoutSlot(String centerName, String workoutType, int startTime, int endTime, int totalSeats) {
             this.centerName = centerName;
@@ -54,6 +62,7 @@ public class GetInShape {
             this.seatsAvailable = totalSeats;
             this.bookedUsers = new HashSet<>();
             this.interestList = new ArrayList<>();
+            this.lock = new ReentrantLock();
         }
 
         String getKey() {
@@ -98,17 +107,13 @@ public class GetInShape {
     // Service
     // ═══════════════════════════════════════════════
 
-    private final Map<String, Center> centers = new LinkedHashMap<>();
+    private final Map<String, Center> centers = new ConcurrentHashMap<>();
     // Quick lookup: "centerName|workoutType|startTime|endTime" → WorkoutSlot
-    private final Map<String, WorkoutSlot> slotIndex = new HashMap<>();
+    private final Map<String, WorkoutSlot> slotIndex = new ConcurrentHashMap<>();
 
     // ─── 1. Onboard Center ───
 
     public void onboardCenter(String centerName, List<String> centerTimings, List<String> workoutTypes) {
-        if (centers.containsKey(centerName)) {
-            throw new IllegalArgumentException("Center already exists: " + centerName);
-        }
-
         List<TimeRange> timings = new ArrayList<>();
         for (String t : centerTimings) {
             String[] parts = t.split("-");
@@ -116,7 +121,12 @@ public class GetInShape {
         }
 
         Set<String> types = new HashSet<>(workoutTypes);
-        centers.put(centerName, new Center(centerName, timings, types));
+        Center center = new Center(centerName, timings, types);
+
+        // Atomic: only succeeds if key didn't exist
+        if (centers.putIfAbsent(centerName, center) != null) {
+            throw new IllegalArgumentException("Center already exists: " + centerName);
+        }
         System.out.println("Onboarded: " + centerName);
     }
 
@@ -128,11 +138,16 @@ public class GetInShape {
         if (startTime >= endTime || totalSeats <= 0) return false;
         if (!center.allowedWorkoutTypes.contains(workoutType)) return false;
         if (!center.isWithinTimings(startTime, endTime)) return false;
-        if (center.hasOverlap(startTime, endTime)) return false;
 
-        WorkoutSlot slot = new WorkoutSlot(centerName, workoutType, startTime, endTime, totalSeats);
-        center.slots.add(slot);
-        slotIndex.put(slot.getKey(), slot);
+        // Synchronized on center: overlap check + add must be atomic
+        // Prevents two admins creating overlapping slots concurrently
+        synchronized (center) {
+            if (center.hasOverlap(startTime, endTime)) return false;
+
+            WorkoutSlot slot = new WorkoutSlot(centerName, workoutType, startTime, endTime, totalSeats);
+            center.slots.add(slot);
+            slotIndex.put(slot.getKey(), slot); // ConcurrentHashMap: atomic publish
+        }
         return true;
     }
 
@@ -173,12 +188,18 @@ public class GetInShape {
         WorkoutSlot slot = slotIndex.get(key);
 
         if (slot == null) return "SLOT_NOT_FOUND";
-        if (slot.bookedUsers.contains(userId)) return "ALREADY_BOOKED";
-        if (slot.seatsAvailable <= 0) return "NO_SEATS";
 
-        slot.bookedUsers.add(userId);
-        slot.seatsAvailable--;
-        return "BOOKED";
+        slot.lock.lock();
+        try {
+            if (slot.bookedUsers.contains(userId)) return "ALREADY_BOOKED";
+            if (slot.seatsAvailable <= 0) return "NO_SEATS";
+
+            slot.bookedUsers.add(userId);
+            slot.seatsAvailable--;
+            return "BOOKED";
+        } finally {
+            slot.lock.unlock();
+        }
     }
 
     // ─── 6. Cancel Session ───
@@ -188,14 +209,30 @@ public class GetInShape {
         WorkoutSlot slot = slotIndex.get(key);
 
         if (slot == null) return "SLOT_NOT_FOUND";
-        if (!slot.bookedUsers.contains(userId)) return "BOOKING_NOT_FOUND";
 
-        slot.bookedUsers.remove(userId);
-        slot.seatsAvailable++;
+        List<String> notifications = null;
 
-        // Auto-notify interested users when a seat frees up
-        if (!slot.interestList.isEmpty()) {
-            List<String> notifications = notifyInterestedUsers(centerName, workoutType, startTime, endTime);
+        slot.lock.lock();
+        try {
+            if (!slot.bookedUsers.contains(userId)) return "BOOKING_NOT_FOUND";
+
+            slot.bookedUsers.remove(userId);
+            slot.seatsAvailable++;
+
+            // Collect notifications inside lock (atomic with cancel)
+            if (!slot.interestList.isEmpty()) {
+                notifications = new ArrayList<>();
+                for (String interestedUser : slot.interestList) {
+                    notifications.add("NOTIFY|" + interestedUser + "|" + centerName + "|" + workoutType + "|" + startTime + "-" + endTime);
+                }
+                slot.interestList.clear();
+            }
+        } finally {
+            slot.lock.unlock();
+        }
+
+        // Fire notifications OUTSIDE lock (avoid holding lock during I/O)
+        if (notifications != null) {
             notifications.forEach(System.out::println);
         }
 
@@ -209,11 +246,17 @@ public class GetInShape {
         WorkoutSlot slot = slotIndex.get(key);
 
         if (slot == null) return "SLOT_NOT_FOUND";
-        if (slot.seatsAvailable > 0) return "SEATS_AVAILABLE";
-        if (slot.interestList.contains(userId)) return "ALREADY_INTERESTED";
 
-        slot.interestList.add(userId);
-        return "INTEREST_ADDED";
+        slot.lock.lock();
+        try {
+            if (slot.seatsAvailable > 0) return "SEATS_AVAILABLE";
+            if (slot.interestList.contains(userId)) return "ALREADY_INTERESTED";
+
+            slot.interestList.add(userId);
+            return "INTEREST_ADDED";
+        } finally {
+            slot.lock.unlock();
+        }
     }
 
     // ─── 8. Notify Interested Users ───
