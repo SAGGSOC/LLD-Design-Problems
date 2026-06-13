@@ -83,13 +83,20 @@ public class Elevator {
         }
 
         // Move one floor
-        if (direction == Direction.UP) currentFloor++;
-        else if (direction == Direction.DOWN) currentFloor--;
+        if (direction == Direction.UP) {
+            currentFloor++;
+            System.out.println("  [Elevator " + id + "] Floor " + currentFloor + " ▲");
+        } else if (direction == Direction.DOWN) {
+            currentFloor--;
+            System.out.println("  [Elevator " + id + "] Floor " + currentFloor + " ▼");
+        }
     }
 
     private void serveCurrentFloor() {
-        // Remove pickup and destination requests at current floor
-        requests.removeIf(r -> r.getFloor() == currentFloor);
+        boolean served = requests.removeIf(r -> r.getFloor() == currentFloor);
+        if (served) {
+            System.out.println("  [Elevator " + id + "] ★ Doors open at floor " + currentFloor);
+        }
     }
 
     private boolean hasRequestsAhead() {

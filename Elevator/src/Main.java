@@ -1,15 +1,11 @@
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
-
 /**
- * Elevator System Demo — demonstrates:
+ * Elevator System Demo — no ScheduledExecutorService.
+ * Just a simple loop calling step() with Thread.sleep().
  *
- * 1. requestElevator(floor, type) → returns assigned Elevator
- * 2. elevator.goTo(floor) → passenger presses internal button
- * 3. Concurrent requests from multiple threads
- * 4. ReadWriteLock for elevator list (maintenance mode)
- * 5. ConcurrentHashMap.newKeySet() for thread-safe request sets
+ * Flow:
+ *   1. requestElevator(floor, type) → returns assigned Elevator
+ *   2. elevator.goTo(floor) → internal button press
+ *   3. step() advances all elevators one floor per call
  */
 public class Main {
 
@@ -19,71 +15,68 @@ public class Main {
 
         ElevatorController controller = new ElevatorController(numElevators, maxFloor);
 
-        // Tick-based: step() runs every 500ms on its own thread
-        ScheduledExecutorService ticker = Executors.newSingleThreadScheduledExecutor();
-        ticker.scheduleAtFixedRate(controller::step, 0, 500, TimeUnit.MILLISECONDS);
+        System.out.println("═══ Elevator System ═══");
+        System.out.println("Elevators: " + numElevators + ", Floors: 0-" + maxFloor + "\n");
 
-        System.out.println("═══ Elevator System (Concurrent) ═══");
-        System.out.println("Elevators: " + numElevators + ", Floors: 0-" + maxFloor);
-        System.out.println();
+        // ─── Scenario 1: Person on floor 5 wants to go to floor 8 ───
+        System.out.println("--- Person on floor 5 presses UP ---");
+        Elevator e1 = controller.requestElevator(5, RequestType.PICKUP_UP);
+        System.out.println("Assigned: Elevator " + e1.getId());
 
-        Thread.sleep(600);
+        // Step until elevator reaches floor 5
+        stepUntilIdle(controller);
         controller.printStatus();
 
-        // ─── Real-world flow: request elevator, then press destination inside ───
-        System.out.println("\n--- Person on floor 5 presses UP ---");
-        Elevator myElevator = controller.requestElevator(5, RequestType.PICKUP_UP);
-        System.out.println("Assigned: Elevator " + myElevator.getId());
+        // Person enters, presses 8
+        System.out.println("\n--- Person presses floor 8 inside ---");
+        e1.goTo(8);
 
-        // Wait for elevator to arrive at floor 5
-        Thread.sleep(3000);
+        stepUntilIdle(controller);
         controller.printStatus();
 
-        // Person steps in, presses floor 8
-        System.out.println("\n--- Person inside presses floor 8 ---");
-        myElevator.goTo(8);
+        // ─── Scenario 2: Multiple requests ───
+        System.out.println("\n--- Floor 2 UP, Floor 7 DOWN ---");
+        Elevator e2 = controller.requestElevator(2, RequestType.PICKUP_UP);
+        System.out.println("Floor 2 UP → Elevator " + e2.getId());
+        e2.goTo(6); // will press 6 once inside
 
-        Thread.sleep(2500);
+        Elevator e3 = controller.requestElevator(7, RequestType.PICKUP_DOWN);
+        System.out.println("Floor 7 DOWN → Elevator " + e3.getId());
+        e3.goTo(1); // will press 1 once inside
+
+        stepUntilIdle(controller);
         controller.printStatus();
 
-        // ─── Concurrent hall calls from different threads ───
-        System.out.println("\n--- Concurrent hall calls ---");
+        // ─── Scenario 3: Same elevator gets multiple destinations ───
+        System.out.println("\n--- Person on floor 0 going to 9 ---");
+        Elevator e4 = controller.requestElevator(0, RequestType.PICKUP_UP);
+        System.out.println("Floor 0 UP → Elevator " + e4.getId());
+        e4.goTo(4);
+        e4.goTo(7);
+        e4.goTo(9); // multiple stops
 
-        Thread t1 = new Thread(() -> {
-            Elevator e = controller.requestElevator(2, RequestType.PICKUP_UP);
-            System.out.println("[Thread-1] Floor 2 UP → Elevator " + e.getId());
-            // Simulate: person enters, presses floor 6
-            e.goTo(6);
-        });
-
-        Thread t2 = new Thread(() -> {
-            Elevator e = controller.requestElevator(7, RequestType.PICKUP_DOWN);
-            System.out.println("[Thread-2] Floor 7 DOWN → Elevator " + e.getId());
-            e.goTo(1);
-        });
-
-        Thread t3 = new Thread(() -> {
-            Elevator e = controller.requestElevator(4, RequestType.PICKUP_UP);
-            System.out.println("[Thread-3] Floor 4 UP → Elevator " + e.getId());
-            e.goTo(9);
-        });
-
-        t1.start(); t2.start(); t3.start();
-        t1.join(); t2.join(); t3.join();
-
-        Thread.sleep(5000);
-        System.out.println("\n--- After all served ---");
+        stepUntilIdle(controller);
         controller.printStatus();
 
-        // ─── Maintenance: remove an elevator ───
-        System.out.println("\n--- Remove Elevator 2 for maintenance ---");
-        controller.removeElevator(2);
-        System.out.println("Remaining: " + controller.getElevatorCount());
-        controller.printStatus();
-
-        // Shutdown
-        ticker.shutdown();
-        ticker.awaitTermination(1, TimeUnit.SECONDS);
         System.out.println("\nDone.");
+    }
+
+    /**
+     * Keep calling step() until all elevators are IDLE (no pending requests).
+     * Simple simulation loop — no threads needed.
+     */
+    private static void stepUntilIdle(ElevatorController controller) throws InterruptedException {
+        int maxSteps = 50; // safety limit
+        int steps = 0;
+
+        while (steps < maxSteps) {
+            controller.step();
+            steps++;
+
+            // Check if all idle
+            if (controller.allIdle()) break;
+
+            Thread.sleep(100); // simulate time passing
+        }
     }
 }

@@ -204,4 +204,17 @@ public class ElevatorController {
         finally { elevatorsLock.readLock().unlock(); }
     }
 
+    public boolean allIdle() {
+        elevatorsLock.readLock().lock();
+        try {
+            for (Elevator e : elevators) {
+                if (e.getDirection() != Direction.IDLE) return false;
+                if (e.getRequestCount() > 0) return false;
+            }
+            return true;
+        } finally {
+            elevatorsLock.readLock().unlock();
+        }
+    }
+
 }
