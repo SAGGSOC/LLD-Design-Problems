@@ -1,4 +1,6 @@
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Doctor Appointment System — In-Memory (Interview Style)
@@ -55,14 +57,16 @@ public class DoctorAppointmentSystem {
     // State
     // ═══════════════════════════════════════════════
 
-    private final Map<String, Doctor> doctors = new LinkedHashMap<>();          // doctorName → Doctor
-    private final Map<String, Booking> bookings = new LinkedHashMap<>();        // bookingId → Booking
+    private final Map<String, Doctor> doctors = new ConcurrentHashMap<>();          // doctorName → Doctor
+    private final Map<String, Booking> bookings = new ConcurrentHashMap<>();        // bookingId → Booking
     // Key: "doctorName|startTime" → confirmed bookingId (or null if free)
-    private final Map<String, String> slotBookings = new HashMap<>();
+    private final Map<String, String> slotBookings = new ConcurrentHashMap<>();
     // Key: "doctorName|startTime" → FIFO waitlist of bookingIds
-    private final Map<String, LinkedList<String>> waitlists = new HashMap<>();
+    private final Map<String, LinkedList<String>> waitlists = new ConcurrentHashMap<>();
     // Key: "patientId|startTime" → confirmed bookingId (for patient conflict check)
-    private final Map<String, String> patientSlots = new HashMap<>();
+    private final Map<String, String> patientSlots = new ConcurrentHashMap<>();
+    // Per-slot lock: "doctorName|startTime" → ReentrantLock
+    private final Map<String, ReentrantLock> slotLocks = new ConcurrentHashMap<>();
 
     // ═══════════════════════════════════════════════
     // 1. Register Doctor
@@ -92,35 +96,43 @@ public class DoctorAppointmentSystem {
         String slotKey = doctorName + "|" + startTime;
         String patientKey = patientId + "|" + startTime;
 
-        // Check if patient already has a confirmed appointment at this time with another doctor
-        String existingPatientBooking = patientSlots.get(patientKey);
-        if (existingPatientBooking != null) {
-            Booking existing = bookings.get(existingPatientBooking);
-            if (existing != null && existing.confirmed && !existing.cancelled
-                && !existing.doctorName.equals(doctorName)) {
-                return "Slot already booked";
-            }
-        }
+        // Get or create per-slot lock
+        ReentrantLock lock = slotLocks.computeIfAbsent(slotKey, k -> new ReentrantLock());
 
-        // Check if this doctor's slot is free
-        String confirmedBookingId = slotBookings.get(slotKey);
-        if (confirmedBookingId == null) {
-            // Slot is free — book it
-            Booking booking = new Booking(bookingId, patientId, doctorName, startTime, true);
-            bookings.put(bookingId, booking);
-            slotBookings.put(slotKey, bookingId);
-            patientSlots.put(patientKey, bookingId);
-            return "BOOKED";
-        } else {
-            // Slot is taken
-            if (addToWaitlistIfBooked) {
-                Booking booking = new Booking(bookingId, patientId, doctorName, startTime, false);
-                bookings.put(bookingId, booking);
-                waitlists.computeIfAbsent(slotKey, k -> new LinkedList<>()).add(bookingId);
-                return "Added to the waitlist";
-            } else {
-                return "Slot already booked";
+        lock.lock();
+        try {
+            // Check if patient already has a confirmed appointment at this time with another doctor
+            String existingPatientBooking = patientSlots.get(patientKey);
+            if (existingPatientBooking != null) {
+                Booking existing = bookings.get(existingPatientBooking);
+                if (existing != null && existing.confirmed && !existing.cancelled
+                    && !existing.doctorName.equals(doctorName)) {
+                    return "Slot already booked";
+                }
             }
+
+            // Check if this doctor's slot is free
+            String confirmedBookingId = slotBookings.get(slotKey);
+            if (confirmedBookingId == null) {
+                // Slot is free — book it
+                Booking booking = new Booking(bookingId, patientId, doctorName, startTime, true);
+                bookings.put(bookingId, booking);
+                slotBookings.put(slotKey, bookingId);
+                patientSlots.put(patientKey, bookingId);
+                return "BOOKED";
+            } else {
+                // Slot is taken
+                if (addToWaitlistIfBooked) {
+                    Booking booking = new Booking(bookingId, patientId, doctorName, startTime, false);
+                    bookings.put(bookingId, booking);
+                    waitlists.computeIfAbsent(slotKey, k -> new LinkedList<>()).add(bookingId);
+                    return "Added to the waitlist";
+                } else {
+                    return "Slot already booked";
+                }
+            }
+        } finally {
+            lock.unlock();
         }
     }
 
@@ -167,39 +179,52 @@ public class DoctorAppointmentSystem {
             return Collections.singletonList("Invalid booking id");
         }
 
-        List<String> messages = new ArrayList<>();
-        booking.cancelled = true;
-
         String slotKey = booking.doctorName + "|" + booking.startTime;
         String patientKey = booking.patientId + "|" + booking.startTime;
 
-        if (booking.confirmed) {
-            // Remove from confirmed slot
-            slotBookings.remove(slotKey);
-            patientSlots.remove(patientKey);
-            messages.add("Booking Cancelled");
+        // Get per-slot lock (same lock used by bookAppointment)
+        ReentrantLock lock = slotLocks.computeIfAbsent(slotKey, k -> new ReentrantLock());
 
-            // Promote from waitlist (FIFO)
-            LinkedList<String> waitlist = waitlists.get(slotKey);
-            if (waitlist != null && !waitlist.isEmpty()) {
-                String promotedId = waitlist.poll();
-                Booking promoted = bookings.get(promotedId);
+        List<String> messages = new ArrayList<>();
 
-                if (promoted != null && !promoted.cancelled) {
-                    promoted.confirmed = true;
-                    slotBookings.put(slotKey, promotedId);
-                    String promotedPatientKey = promoted.patientId + "|" + promoted.startTime;
-                    patientSlots.put(promotedPatientKey, promotedId);
-                    messages.add("Booking confirmed for Booking id: " + promotedId);
+        lock.lock();
+        try {
+            if (booking.cancelled) {
+                return Collections.singletonList("Invalid booking id");
+            }
+
+            booking.cancelled = true;
+
+            if (booking.confirmed) {
+                // Remove from confirmed slot
+                slotBookings.remove(slotKey);
+                patientSlots.remove(patientKey);
+                messages.add("Booking Cancelled");
+
+                // Promote from waitlist (FIFO)
+                LinkedList<String> waitlist = waitlists.get(slotKey);
+                if (waitlist != null && !waitlist.isEmpty()) {
+                    String promotedId = waitlist.poll();
+                    Booking promoted = bookings.get(promotedId);
+
+                    if (promoted != null && !promoted.cancelled) {
+                        promoted.confirmed = true;
+                        slotBookings.put(slotKey, promotedId);
+                        String promotedPatientKey = promoted.patientId + "|" + promoted.startTime;
+                        patientSlots.put(promotedPatientKey, promotedId);
+                        messages.add("Booking confirmed for Booking id: " + promotedId);
+                    }
                 }
+            } else {
+                // Was on waitlist — remove from waitlist
+                LinkedList<String> waitlist = waitlists.get(slotKey);
+                if (waitlist != null) {
+                    waitlist.remove(bookingId);
+                }
+                messages.add("Booking Cancelled");
             }
-        } else {
-            // Was on waitlist — remove from waitlist
-            LinkedList<String> waitlist = waitlists.get(slotKey);
-            if (waitlist != null) {
-                waitlist.remove(bookingId);
-            }
-            messages.add("Booking Cancelled");
+        } finally {
+            lock.unlock();
         }
 
         return messages;
