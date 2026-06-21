@@ -26,13 +26,15 @@ public class FoodCart {
     static class Restaurant {
         final String id;
         final int capacity;
+        final double rating; // restaurant rating (higher is better)
         Map<String, Long> menu; // itemName → price
         int openOrders;
         final ReentrantLock lock = new ReentrantLock(); // per-restaurant lock
 
-        Restaurant(String id, int capacity, Map<String, Long> menu) {
+        Restaurant(String id, int capacity, double rating, Map<String, Long> menu) {
             this.id = id;
             this.capacity = capacity;
+            this.rating = rating;
             this.menu = new HashMap<>(menu);
             this.openOrders = 0;
         }
@@ -106,6 +108,29 @@ public class FoodCart {
         }
     }
 
+    static class BestRatingStrategy implements RestaurantSelectionStrategy {
+        @Override
+        public Restaurant select(List<Restaurant> candidates, List<String> items) {
+            Restaurant best = null;
+            for (Restaurant r : candidates) {
+                if (best == null) { best = r; continue; }
+                if (r.rating > best.rating) { best = r; }
+                else if (r.rating == best.rating) {
+                    long priceCurr = r.totalPrice(items);
+                    long priceBest = best.totalPrice(items);
+                    if (priceCurr < priceBest) { best = r; }
+                    else if (priceCurr == priceBest) {
+                        if (r.remainingCapacity() > best.remainingCapacity()) { best = r; }
+                        else if (r.remainingCapacity() == best.remainingCapacity()) {
+                            if (r.id.compareTo(best.id) < 0) { best = r; }
+                        }
+                    }
+                }
+            }
+            return best;
+        }
+    }
+
     static class MaxRemainingCapacityStrategy implements RestaurantSelectionStrategy {
         @Override
         public Restaurant select(List<Restaurant> candidates, List<String> items) {
@@ -140,6 +165,7 @@ public class FoodCart {
 
     public FoodCart() {
         strategies.put("LOWEST_TOTAL_PRICE", new LowestTotalPriceStrategy());
+        strategies.put("BEST_RATING", new BestRatingStrategy());
         strategies.put("MAX_REMAINING_CAPACITY", new MaxRemainingCapacityStrategy());
     }
 
@@ -148,7 +174,8 @@ public class FoodCart {
     // ═══════════════════════════════════════════════
 
     public List<String> processCommands(List<String> commands) {
-        // Create indexed commands for sorting by timestamp while preserving original positions
+        // Create indexed commands for sorting by timestamp while preserving original positionsenecccfedetlhbgjfgctnrffcggehdftncbkrulukjtt
+        
         int n = commands.size();
         String[] results = new String[n];
 
@@ -177,10 +204,10 @@ public class FoodCart {
             String result;
             switch (command) {
                 case "ADD_RESTAURANT":
-                    // Format: timestamp|ADD_RESTAURANT|restaurantId|capacity|menu
-                    // Example: "100|ADD_RESTAURANT|R1|2|burger:120,pizza:200"
-                    //   parts[0]="100", parts[1]="ADD_RESTAURANT", parts[2]="R1", parts[3]="2", parts[4]="burger:120,pizza:200"
-                    result = addRestaurant(parts[2], Integer.parseInt(parts[3]), parts[4]);
+                    // Format: timestamp|ADD_RESTAURANT|restaurantId|capacity|rating|menu
+                    // Example: "100|ADD_RESTAURANT|R1|2|4.5|burger:120,pizza:200"
+                    //   parts[0]="100", parts[1]="ADD_RESTAURANT", parts[2]="R1", parts[3]="2", parts[4]="4.5", parts[5]="burger:120,pizza:200"
+                    result = addRestaurant(parts[2], Integer.parseInt(parts[3]), Double.parseDouble(parts[4]), parts[5]);
                     break;
                 case "UPDATE_MENU":
                     // Format: timestamp|UPDATE_MENU|restaurantId|menuUpdates
@@ -214,9 +241,9 @@ public class FoodCart {
     // Command Implementations
     // ═══════════════════════════════════════════════
 
-    private String addRestaurant(String restaurantId, int capacity, String menuStr) {
+    private String addRestaurant(String restaurantId, int capacity, double rating, String menuStr) {
         Map<String, Long> menu = parseMenu(menuStr);
-        Restaurant restaurant = new Restaurant(restaurantId, capacity, menu);
+        Restaurant restaurant = new Restaurant(restaurantId, capacity, rating, menu);
         // Atomic: only succeeds if key didn't exist
         if (restaurants.putIfAbsent(restaurantId, restaurant) != null) {
             return "RESTAURANT_ALREADY_EXISTS";
@@ -374,8 +401,8 @@ public class FoodCart {
 
         List<String> commands = Arrays.asList(
             "200|PLACE_ORDER|O1|C1|LOWEST_TOTAL_PRICE|burger,pizza",
-            "100|ADD_RESTAURANT|R1|2|burger:120,pizza:200",
-            "150|ADD_RESTAURANT|R2|1|burger:110,pizza:220",
+            "100|ADD_RESTAURANT|R1|2|4.5|burger:120,pizza:200",
+            "150|ADD_RESTAURANT|R2|1|4.2|burger:110,pizza:220",
             "210|PLACE_ORDER|O2|C2|LOWEST_TOTAL_PRICE|burger",
             "220|DISPATCH_ORDER|O1",
             "205|UPDATE_MENU|R2|pizza:180",
@@ -411,8 +438,8 @@ public class FoodCart {
 
         FoodCart cart2 = new FoodCart();
         List<String> cmds2 = Arrays.asList(
-            "100|ADD_RESTAURANT|R1|5|burger:120,pizza:200",
-            "101|ADD_RESTAURANT|R2|3|burger:110,pizza:180",
+            "100|ADD_RESTAURANT|R1|5|4.8|burger:120,pizza:200",
+            "101|ADD_RESTAURANT|R2|3|4.3|burger:110,pizza:180",
             "200|PLACE_ORDER|O1|C1|MAX_REMAINING_CAPACITY|burger,pizza",
             "201|PLACE_ORDER|O2|C2|MAX_REMAINING_CAPACITY|burger",
             "202|PLACE_ORDER|O3|C3|LOWEST_TOTAL_PRICE|burger"
@@ -429,8 +456,8 @@ public class FoodCart {
 
         FoodCart cart3 = new FoodCart();
         List<String> cmds3 = Arrays.asList(
-            "100|ADD_RESTAURANT|R1|1|burger:100",
-            "100|ADD_RESTAURANT|R1|2|pizza:200",     // duplicate
+            "100|ADD_RESTAURANT|R1|1|4.0|burger:100",
+            "100|ADD_RESTAURANT|R1|2|3.5|pizza:200",     // duplicate
             "200|PLACE_ORDER|O1|C1|LOWEST_TOTAL_PRICE|burger",
             "201|PLACE_ORDER|O2|C2|LOWEST_TOTAL_PRICE|burger",  // capacity full
             "202|PLACE_ORDER|O3|C3|LOWEST_TOTAL_PRICE|sushi",   // item not found
